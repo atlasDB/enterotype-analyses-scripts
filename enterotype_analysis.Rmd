@@ -1,0 +1,494 @@
+---
+title: "enterotyp_analysis"
+author: "Xiao Liwen"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+library(cluster)
+library(clusterSim)
+library(ade4)
+library(fpc)
+library(ggplot2)
+library(car)
+library(reshape2)
+library(Rmisc)
+library(randomForest)
+library(phyloseq)
+library(igraph)
+library(markovchain)
+library(RColorBrewer)
+library(gridExtra)
+library(FEAST)
+library(pheatmap)
+```
+
+
+```{r clustering using PAM}
+rm(list = ls())
+data = read.table("genus_abundance.txt", header=T, row.names=1, dec=".", sep="\t")
+List = read.table("metadata.txt", header=T, row.names=1, dec=".", sep="\t")
+##function
+dist.JSD <- function(inMatrix, pseudocount=0.000001, ...) {
+  KLD <- function(x,y) sum(x *log(x/y))
+  JSD<- function(x,y) sqrt(0.5 * KLD(x, (x+y)/2) + 0.5 * KLD(y, (x+y)/2))
+  matrixColSize <- length(colnames(inMatrix))
+  matrixRowSize <- length(rownames(inMatrix))
+  colnames <- colnames(inMatrix)
+  resultsMatrix <- matrix(0, matrixColSize, matrixColSize)
+  inMatrix = apply(inMatrix,1:2,function(x) ifelse (x==0,pseudocount,x))
+  for(i in 1:matrixColSize) {
+    for(j in 1:matrixColSize) { 
+      resultsMatrix[i,j]=JSD(as.vector(inMatrix[,i]),
+                             as.vector(inMatrix[,j]))
+    }
+  }
+  colnames -> colnames(resultsMatrix) -> rownames(resultsMatrix)
+  as.dist(resultsMatrix)->resultsMatrix
+  attr(resultsMatrix, "method") <- "dist"
+  return(resultsMatrix) 
+}
+
+##clustering
+data.dist=dist.JSD(data)
+pam.clustering=function(x,k) { # x is a distance matrix and k the number of clusters
+  require(cluster)
+  cluster = as.vector(pam(as.dist(x), k, diss=TRUE)$clustering)
+  return(cluster)
+}
+data.cluster=pam.clustering(data.dist, k=3)
+require(clusterSim)
+nclusters = index.G1(t(data), data.cluster, d = data.dist, centrotypes = "medoids")
+nclusters=NULL
+for (k in 1:20) { 
+  if (k==1) {
+    nclusters[k]=NA 
+  } else {
+    data.cluster_temp=pam.clustering(data.dist, k)
+    nclusters[k]=index.G1(t(data),data.cluster_temp,  d = data.dist,
+                          centrotypes = "medoids")
+  }
+}
+
+##plot CH index
+plot(nclusters, type="h", xlab="k clusters", ylab="CH index",main="Optimal number of clusters")
+obs.silhouette=mean(silhouette(data.cluster, data.dist)[,3])
+cat(obs.silhouette) 
+
+##remove noise
+noise.removal <- function(dataframe, percent=0.01, top=NULL){
+  dataframe->Matrix
+  bigones <- rowSums(Matrix)*100/(sum(rowSums(Matrix))) > percent 
+  Matrix_1 <- Matrix[bigones,]
+  print(percent)
+  return(Matrix_1)
+}
+data=noise.removal(data, percent=0.01)
+obs.pca=dudi.pca(data.frame(t(data)), scannf=F, nf=10)
+obs.bet=bca(obs.pca, fac=as.factor(data.cluster), scannf=F, nf=k-1) 
+enterList = data.frame(obs.bet$ls,group = as.factor(data.cluster))
+write.table(enterList,"enterotpingList.txt",row.names = T,col.names = T,quote = F,sep = "\t")
+
+```
+
+
+
+```{r enterotype plot}
+rm(list = ls())
+myList1 = read.table("enterotpingList_y1.txt",header = T,row.names = 1,sep = '\t')
+myList2 = read.table("enterotpingList_y2.txt",header = T,row.names = 1,sep = '\t')
+myList3 = read.table("enterotpingList_y3.txt",header = T,row.names = 1,sep = '\t')
+#year1
+plot.new()
+with(myList1, smoothScatter(CS1,CS2, main ="scaterplot for 10000 observations"))
+s.class(myList1,fac = factor(myList1$group),cpoint = 0,add.plot = T,col = c("#CDBE6A","#89CFBE","#86A4CF"),cstar = 0,cellipse = 1.5)
+#year2
+plot.new()
+with(myList2, smoothScatter(CS1,CS2, main ="scaterplot for 10000 observations"))
+s.class(myList2,fac = factor(myList2$group),cpoint = 0,add.plot = T,col = c("#89CFBE","#86A4CF","#DFAD9F"),cstar = 0,cellipse = 1.3)
+#year3
+plot.new()
+with(myList3, smoothScatter(CS1,CS2, main ="scaterplot for 10000 observations"))
+s.class(myList3,fac = factor(myList3$group),cpoint = 0,add.plot = T,col = c("#89CFBE","#86A4CF","#DFAD9F"),cstar = 0,cellipse = 2)
+
+```
+
+
+
+```{r microbiota age}
+rm(list = ls())
+set.seed(1234)
+Sample = read.table("genus_abundance.txt",header = T, row.names = 1)
+List = read.table("metadata.txt",header = T,row.names = 1,sep = '\t')
+List = List[rownames(List) %in% colnames(Sample),]
+#e1
+List.e1 = List[which(List[,"type"] == 1),] 
+List.e1.term = List.e1[which(List.e1[,"station"] == "term"),]
+e1 = data.frame(t(data.frame(t(Sample))[rownames(List.e1),]))
+e1_t = data.frame(t(e1))
+e1.n = sample(1:length(List.e1.term[,1]),0.1*(length(List.e1.term[,1])),replace = F)
+e1_t.n = e1_t[rownames(List.e1.term[e1.n,]),]
+e1.rf = randomForest(e1_t.n)
+##importance
+e1.taxa = data.frame(e1.rf$importance)
+e1.taxa = data.frame(genus = rownames(e1.taxa), Geni = e1.taxa[,1])
+e1.taxa = e1.taxa[rev(order(e1.taxa[,2])),]
+rownames(e1.taxa) = e1.taxa[,1]
+e1_t$days = 0
+e1_t[,"days"] = List[rownames(e1_t),2]
+result = rfcv(e1_t[,-length(e1_t[1,])], e1_t$days, cv.fold = 100)
+n = result$n.var
+m = result$error.cv
+num = n[which(m == min(m))]
+#####
+e1.trim = e1_t[,c(1:num,length(e1_t[1,]))]
+e1.rf = randomForest(days ~ ., e1.trim, ntree=10000, nPerm=100, mtry=3, proximity=TRUE, importance=TRUE) 
+e1.taxa2 = e1.rf$importance
+e1.pred = predict(e1.rf, e1.trim)
+e1.age = data.frame(sample = names(e1.pred) , MicrobiotaAge = e1.pred, ChronologicalAge = e1.trim[,"days"])
+write.table(e1.age,"microbiotaAge_e1.txt",quote = F,row.names = F,col.names = T,sep = '\t')
+
+#e2
+List.e2 = List[which(List[,"type"] == 2),] 
+List.e2.term = List.e2[which(List.e2[,"station"] == "term"),]
+e2 = data.frame(t(data.frame(t(Sample))[rownames(List.e2),]))
+e2_t = data.frame(t(e2))
+e2.n = sample(1:length(List.e2.term[,1]),0.1*(length(List.e2.term[,1])),replace = F)
+e2_t.n = e2_t[rownames(List.e2.term[e2.n,]),]
+e2.rf = randomForest(e2_t.n)
+##importance
+e2.taxa = data.frame(e2.rf$importance)
+e2.taxa = data.frame(genus = rownames(e2.taxa), Geni = e2.taxa[,1])
+e2.taxa = e2.taxa[rev(order(e2.taxa[,2])),]
+rownames(e2.taxa) = e2.taxa[,1]
+e2_t$days = 0
+e2_t[,"days"] = List[rownames(e2_t),2]
+result = rfcv(e2_t[,-length(e2_t[1,])], e2_t$days, cv.fold = 100)
+n = result$n.var
+m = result$error.cv
+num = n[which(m == min(m))]
+#####
+e2.trim = e2_t[,c(1:num,length(e2_t[1,]))]
+e2.rf = randomForest(days ~ ., e2.trim, ntree=10000, nPerm=100, mtry=3, proximity=TRUE, importance=TRUE) 
+e2.taxa2 = e2.rf$importance
+e2.pred = predict(e2.rf, e2.trim)
+e2.age = data.frame(sample = names(e2.pred) , MicrobiotaAge = e2.pred, ChronologicalAge = e2.trim[,"days"])
+write.table(e2.age,"microbiotaAge_e2.txt",quote = F,row.names = F,col.names = T,sep = '\t')
+
+#e3
+List.e3 = List[which(List[,"type"] == 3),] 
+List.e3.term = List.e3[which(List.e3[,"station"] == "term"),]
+e3 = data.frame(t(data.frame(t(Sample))[rownames(List.e3),]))
+e3_t = data.frame(t(e3))
+e3.n = sample(1:length(List.e3.term[,1]),0.1*(length(List.e3.term[,1])),replace = F)
+e3_t.n = e3_t[rownames(List.e3.term[e3.n,]),]
+e3.rf = randomForest(e3_t.n)
+##importance
+e3.taxa = data.frame(e3.rf$importance)
+e3.taxa = data.frame(genus = rownames(e3.taxa), Geni = e3.taxa[,1])
+e3.taxa = e3.taxa[rev(order(e3.taxa[,2])),]
+rownames(e3.taxa) = e3.taxa[,1]
+e3_t$days = 0
+e3_t[,"days"] = List[rownames(e3_t),2]
+result = rfcv(e3_t[,-length(e3_t[1,])], e3_t$days, cv.fold = 100)
+n = result$n.var
+m = result$error.cv
+num = n[which(m == min(m))]
+#####
+e3.trim = e3_t[,c(1:num,length(e3_t[1,]))]
+e3.rf = randomForest(days ~ ., e3.trim, ntree=10000, nPerm=100, mtry=3, proximity=TRUE, importance=TRUE) 
+e3.taxa2 = e3.rf$importance
+e3.pred = predict(e3.rf, e3.trim)
+e3.age = data.frame(sample = names(e3.pred) , MicrobiotaAge = e3.pred, ChronologicalAge = e3.trim[,"days"])
+write.table(e3.age,"microbiotaAge_e3.txt",quote = F,row.names = F,col.names = T,sep = '\t')
+
+#e4
+List.e4 = List[which(List[,"type"] == 4),] 
+List.e4.term = List.e4[which(List.e4[,"station"] == "term"),]
+e4 = data.frame(t(data.frame(t(Sample))[rownames(List.e4),]))
+e4_t = data.frame(t(e4))
+e4.n = sample(1:length(List.e4.term[,1]),0.1*(length(List.e4.term[,1])),replace = F)
+e4_t.n = e4_t[rownames(List.e4.term[e4.n,]),]
+e4.rf = randomForest(e4_t.n)
+##importance
+e4.taxa = data.frame(e4.rf$importance)
+e4.taxa = data.frame(genus = rownames(e4.taxa), Geni = e4.taxa[,1])
+e4.taxa = e4.taxa[rev(order(e4.taxa[,2])),]
+rownames(e4.taxa) = e4.taxa[,1]
+e4_t$days = 0
+e4_t[,"days"] = List[rownames(e4_t),2]
+result = rfcv(e4_t[,-length(e4_t[1,])], e4_t$days, cv.fold = 100)
+n = result$n.var
+m = result$error.cv
+num = n[which(m == min(m))]
+#####
+e4.trim = e4_t[,c(1:num,length(e4_t[1,]))]
+e4.rf = randomForest(days ~ ., e4.trim, ntree=10000, nPerm=100, mtry=3, proximity=TRUE, importance=TRUE) 
+e4.taxa2 = e4.rf$importance
+e4.pred = predict(e4.rf, e4.trim)
+e4.age = data.frame(sample = names(e4.pred) , MicrobiotaAge = e4.pred, ChronologicalAge = e4.trim[,"days"])
+write.table(e4.age,"microbiotaAge_e4.txt",quote = F,row.names = F,col.names = T,sep = '\t')
+
+##density plot
+e1.age = read.table("microbiotaAge_e1.txt",header = T,sep = '\t',row.names = 1)
+e2.age = read.table("microbiotaAge_e2.txt",header = T,sep = '\t',row.names = 1)
+e3.age = read.table("microbiotaAge_e3.txt",header = T,sep = '\t',row.names = 1)
+e4.age = read.table("microbiotaAge_e4.txt",header = T,sep = '\t',row.names = 1)
+e1.age$type = rep(1,length(e1.age[,1]))
+e2.age$type = rep(2,length(e2.age[,1]))
+e3.age$type = rep(3,length(e3.age[,1]))
+e4.age$type = rep(4,length(e4.age[,1]))
+e = rbind(e1.age,e2.age,e3.age,e4.age)
+
+##plot Figure 1D
+plot.new()
+with(e, smoothScatter(ChronologicalAge,MicrobiotaAge, main ="scaterplot for 10000 observations"))
+ggplot(e, aes(x = ChronologicalAge, y = MicrobiotaAge, color = as.factor(type), group = as.factor(type)))+
+  #geom_point(alpha = 0.3)+
+  geom_smooth(method = "loess", size = 2)+
+  scale_color_manual(values = c("#CDBE6A","#89CFBE","#86A4CF","#DFAD9F"),name = "Type")+
+  labs(x = "Chronological Age", y = "Microbiota Age")+
+  theme(axis.text = element_text(size = 20),axis.title = element_text(size = 20))+
+  theme(legend.title = element_text(size = 20),legend.text = element_text(size = 20))+
+  theme_classic()
+
+```
+
+
+```{r species abundance}
+rm(list = ls())
+info = read.table("metadata_WGS.txt",header = T,sep = '\t',row.names = 1)
+Sample = read.table("species_abundance.txt",header = T,sep = '\t',row.names = 1,stringsAsFactors = F)
+Sample$species = rownames(Sample)
+a = melt(Sample,id.vars = "species")
+b = a[which(a[,3] > 0),]
+b$nation = info[as.character(b[,2]),"nation"]
+myData = b
+colnames(myData) = c("species","sample","abundance","nation")
+myLevel = info[order(info[,2]),]
+myData$sample = factor(myData$sample, levels = rownames(myLevel))
+myData$day = info[as.character(myData[,2]),2]
+myData$type = info[as.character(myData[,2]),"type"]
+v = array(dim = c(length(Sample[,1]),1))
+for (i in 1:length(Sample[,1]))
+{
+  v[i,1] = var(as.numeric(as.character(Sample[i,-length(Sample[1,])])))
+}
+rownames(v) = rownames(Sample)
+p = data.frame(v[rev(order(v[,1])),])
+trim = myData[myData[,1] %in% rownames(p)[1:30],]
+trim4 = trim[which(trim$type == 4),]
+trim123 = trim[which(trim$type != 4),]
+trim123 = trim123[-which(trim123[,3] < 0.1),]
+trim.all = rbind(trim123,trim4)
+
+##plot Figure 2A
+ggplot(trim.all,aes(x = day,y = species,color = nation))+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  #geom_point(size = (trim$abundance*10)^1.5/8,alpha = .3)+
+  geom_point(aes(size = (abundance*10)^1.5/8),shape = 1)+
+  scale_color_manual(values = c("#F28355","#B68FC7","#006A30","#AAAEB3"))+
+  facet_grid(.~type,scales = "free")+
+  theme(legend.position = "top")
+
+```
+
+
+```{r markov chain}
+rm(list = ls())
+##function
+samdat.prune_prev <- function(samdat) {
+  GAP_MIN <- 120
+  GAP_MAX <- 1000
+  samdf <- data.frame(samdat)
+  subjects <- unique(samdf$SubjectID)
+  csub <- split(samdf, samdf$SubjectID)
+  for(sub in subjects) {
+    cc <- csub[[sub]]
+    cc <- cc[order(cc$GDColl),]
+    cc$PrevID <- c(NA, cc$SampleID[-nrow(cc)])
+    del <- cc$GDColl - c(-999, cc$GDColl[-nrow(cc)])
+    keep <- del>=GAP_MIN & del<=GAP_MAX
+    if(sum(keep) == 0) {
+      csub[[sub]] <- NULL
+    } else {
+      cc <- cc[keep,]
+      csub[[sub]] <- cc
+    }
+  }
+  return(do.call(rbind, csub))
+}
+
+##calculate transition probability
+samdf = read.table("transitionList.txt",header = T,sep = '\t',row.names = 1)
+Sample = read.table("trnasitionAbundance.txt",header = T, row.names = 1)
+samdf = samdf[rownames(samdf) %in% colnames(Sample),]
+rownames(samdf) -> samdf$SampleID
+samdf$type = as.factor(samdf$type)
+CSTs <- levels(samdf$type)
+nstates <- nlevels(samdf$type)
+samdf_prev <- samdat.prune_prev(samdf)
+rownames(samdf_prev) <- samdf_prev$SampleID
+samdf_prev$PrevCST <- data.frame(samdf)[samdf_prev$PrevID,"type"]
+samdf_prev$CurCST <- samdf_prev$type
+ttab <- table(samdf_prev$PrevCST, samdf_prev$CurCST) # prevstate=row, curstate=col
+trans <- matrix(ttab, nrow=nstates)
+trans <- trans/rowSums(trans)  # Normalize row sums to 1
+CSTtrans <- trans
+colnames(CSTtrans) <- CSTs
+rownames(CSTtrans) <- CSTs
+t_persist <- -1/log(diag(CSTtrans))
+
+##markov chain
+mcPreg <- new("markovchain", states=CSTs,
+              transitionMatrix = trans, name="PregCST")
+netMC <- markovchain:::.getNet(mcPreg, round = TRUE)
+wts <- E(netMC)$weight/100
+edgel <- get.edgelist(netMC)
+elcat <- paste(edgel[,1], edgel[,2])
+elrev <- paste(edgel[,2], edgel[,1])
+edge.curved <- sapply(elcat, function(x) x %in% elrev)
+default.par <- par(no.readonly = TRUE)
+plotMC <- function(object, ...) {
+  netMC <- markovchain:::.getNet(object, round = TRUE)
+  plot.igraph(x = netMC, ...)  
+}
+vert.sz <- 2*sapply(states(mcPreg), 
+                        function(x) nrow(unique(sample_data(samdf)[sample_data(samdf)$type==x,"SubjectID"])))
+vert.sz <- log(vert.sz)*5
+vert.font.clrs <- c("white", "white", "white", "white")
+edge.loop.angle = c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3.14, 0, 0, 0, 0, 0)-0.45
+layout <- matrix(c(0.6,0.95, 0.43,1, 0.3,0.66, 0.55,0.3), nrow=4, ncol=2, byrow=T)
+#layout(matrix(c(1,1,2,2), 2, 2, byrow = TRUE), heights=c(1,10))
+par(mar=c(0,1,1,1)+0.1)
+edge.arrow.size=1
+edge.arrow.width=1
+edge.width = (6*wts + 0.1)
+edge.labels <- as.character(E(netMC)$weight/100)
+edge.labels[edge.labels<0.2] <- NA  # labels only for self-loops
+
+##plot Figure 3B
+plotMC(mcPreg, edge.arrow.size=edge.arrow.size, edge.arrow.width = edge.arrow.width,
+       edge.label = edge.labels, edge.label.font=2, edge.label.cex=1.3, edge.label.color="black",
+       edge.width=edge.width, edge.curved=edge.curved, 
+       vertex.size=(vert.sz),
+       vertex.label.font = 2, vertex.label.cex = 2,
+       vertex.label.color = vert.font.clrs, vertex.frame.color = NA, 
+       vertex.color = c("#CDBE6A","#89CFBE","#86A4CF","#DFAD9F"),
+       layout = layout, edge.loop.angle = edge.loop.angle)
+
+
+```
+
+
+
+```{r SourceTracking using FEAST}
+rm(list = ls())
+a = read.table("month_filter.txt",header = T)
+b = read.table("metadata.txt",header = T,sep = '\t')
+a$name = paste(a$sub,a$type,a$month,sep = "_")  ##sub splited by group && time point > 3
+b$name = paste(b$SubjectID,b$type,b$month,sep = "_")  ##all sub
+c = b[as.character(b$name) %in% as.character(a$name),c("SampleID","SubjectID","month","type")]   ##sample splited by group && time point > 3
+##permutation
+r = rownames(c)  
+rr = sample(r, length(r), replace = F)  ##disturbe
+cc = c[rr,]
+d = cc[rownames(unique(cc[,c(2:4)])),]
+dd = d[order(d$SubjectID),]  ##random samples
+
+##FEAST
+otu = Load_CountMatrix(CountMatrix_path = "genus_abundance.txt")
+otu = ceiling(1000000*otu)
+metadata = b[as.character(b$SampleID) %in% as.character(dd$SampleID),c("SampleID","type","month")]
+rownames(metadata) = metadata$SampleID
+metadata = metadata[,-1]
+otus = otu[as.character(rownames(otu)) %in% as.character(rownames(metadata)),]
+for (k in 2:max(metadata$month))
+{
+  meta.sink = metadata[which(metadata$month == k),]
+  meta.source = metadata[which(metadata$month == k-1),]
+  gap = 100
+  if (length(meta.sink[,1]) == 0 || length(meta.source[,1]) == 0)
+  {
+    next
+  }else if (length(meta.sink[,1]) < gap || length(meta.source[,1]) < gap)
+  {
+    meta.sink = meta.sink
+    meta.source = meta.source
+  }else
+  {
+    s1 = sample(rownames(meta.sink),gap,replace = F) 
+    meta.sink = meta.sink[s1,]
+    s2 = sample(rownames(meta.source),gap,replace = F)
+    meta.source = meta.source[s2,]
+  }
+  meta.sink[,2] = "Sink"
+  meta.source[,2] = "Source"
+  meta.sink$id = c(1:length(meta.sink[,1]))
+  meta.source$id = NA
+  meta.group = rbind(meta.sink,meta.source)
+  colnames(meta.group) = c("Env","SourceSink","id")
+  otu.group = otus[as.character(rownames(otus)) %in% as.character(rownames(meta.group)),]
+  eval(parse(text=paste("try(FEAST_output <- FEAST(C = otu.group, metadata = meta.group, different_sources_flag = 0,
+                            dir_path = getwd(),
+                            outfile = paste('month',k,sep = '')),silent = T)",sep = "")))
+}
+
+```
+
+
+```{r pathway heatmap}
+rm(list = ls())
+List = read.table("metadata_WGS.txt",header = T,row.names = 1,sep = '\t')
+Sample = read.table("pathway_abundance.txt",header = T,row.names = 1,sep = '\t',quote = "")
+a = data.frame(t(Sample))
+a$month = List[rownames(a),3]
+e1.list = List[which(List[,4] == 1),]
+e2.list = List[which(List[,4] == 2),]
+e3.list = List[which(List[,4] == 3),]
+e4.list = List[which(List[,4] == 4),]
+e1 = a[rownames(a) %in% rownames(e1.list),]
+e2 = a[rownames(a) %in% rownames(e2.list),]
+e3 = a[rownames(a) %in% rownames(e3.list),]
+e4 = a[rownames(a) %in% rownames(e4.list),]
+b1 = melt(e1,id.vars = "month")
+b2 = melt(e2,id.vars = "month")
+b3 = melt(e3,id.vars = "month")
+b4 = melt(e4,id.vars = "month")
+colnames(b1)[2] = "pathway"
+c1 = dcast(b1,pathway~month,mean,fill = 0)
+colnames(b2)[2] = "pathway"
+c2 = dcast(b2,pathway~month,mean,fill = 0)
+colnames(b3)[2] = "pathway"
+c3 = dcast(b3,pathway~month,mean,fill = 0)
+colnames(b4)[2] = "pathway"
+c4 = dcast(b4,pathway~month,mean,fill = 0)
+rownames(c1) = c1[,1]
+c1 = c1[,-1]
+rownames(c2) = c2[,1]
+c2 = c2[,-1]
+rownames(c3) = c3[,1]
+c3 = c3[,-1]
+rownames(c4) = c4[,1]
+c4 = c4[,-1]
+c = cbind(c1[,1:3],c2,c3,c4)
+d = data.frame(t(c))
+d$entero = c("a","a","a","b","b","b","b","b","b","c","c","c","c","c","c","d","d","d")
+annotation_row = data.frame(entero = d$entero)
+anno_color = list(entero = c(a = "#CDBE6A", b = "#89CFBE", c = "#86A4CF",d = "#DFAD9F"))
+myData = data.frame(t(d[,1:(length(d[1,])-1)]))
+colnames(myData) = c(1:18)
+v = array(dim = c(length(myData[,1]),1))
+for (i in 1:length(myData[,1]))
+{
+  v[i,1] = var(as.numeric(as.character(myData[i,])))
+}
+trim = myData[which(v[,1] > 20*median(v)),]
+
+##plot Figure 5B
+pheatmap(sqrt(trim)/180, annotation_col = annotation_row, annotation_colors = anno_color,cluster_cols = F)
+
+```
+
